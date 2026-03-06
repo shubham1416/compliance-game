@@ -390,11 +390,11 @@ class OfficeScene extends Phaser.Scene {
     this.username = localStorage.getItem('cg_username') || 'Player';
     this.domain = localStorage.getItem('cg_domain') || 'cyber';
     this.level = 1;
-    this.lives = 3;
-    this.maxLives = 3;
+    this.health = 100;
     this.correct = 0;
     this.total = 0;
     this.levelCorrect = 0;
+    this.scenariosCompleted = 0;
     this.scenarioRunning = false;
     this.timerInterval = null;
     this.scenariosUsed = new Set();
@@ -405,6 +405,8 @@ class OfficeScene extends Phaser.Scene {
     this.playerWalkFrame = 0;
     this.playerWalkTimer = 0;
     this.playerIsSitting = true;
+    this.lastPlayerMoveTime = 0;
+    this.lastHealthDrainTime = 0;
   }
 
   preload() {
@@ -523,24 +525,25 @@ class OfficeScene extends Phaser.Scene {
 
     // Controls
     this.cursors = this.input.keyboard.createCursorKeys();
+    this.input.keyboard.removeCapture('SPACE');
     this.wasd = this.input.keyboard.addKeys({ w: 'W', a: 'A', s: 'S', d: 'D' });
 
     // Collision Walls for the "Bay Area" (Corridors) logic
     // Block Top Area (Cafeteria/Tables)
-    this.addWall(0, 0, this.mapW, this.mapH * 0.22);
+    this.addWall(0, 0, this.mapW, this.mapH * 0.18);
 
-    // Block Desk Islands
+    // Block Desk Islands (Tuned to be tighter so player can roam around blocks nicely)
     // Top Row Desks
-    this.addWall(this.mapW * 0.25, this.mapH * 0.22, this.mapW * 0.2, this.mapH * 0.15);
-    this.addWall(this.mapW * 0.55, this.mapH * 0.22, this.mapW * 0.2, this.mapH * 0.15);
+    this.addWall(this.mapW * 0.26, this.mapH * 0.25, this.mapW * 0.16, this.mapH * 0.14);
+    this.addWall(this.mapW * 0.58, this.mapH * 0.25, this.mapW * 0.16, this.mapH * 0.14);
 
     // Middle Row Desks (Large Islands)
-    this.addWall(this.mapW * 0.15, this.mapH * 0.45, this.mapW * 0.3, this.mapH * 0.18);
-    this.addWall(this.mapW * 0.55, this.mapH * 0.45, this.mapW * 0.3, this.mapH * 0.18);
+    this.addWall(this.mapW * 0.18, this.mapH * 0.48, this.mapW * 0.22, this.mapH * 0.14);
+    this.addWall(this.mapW * 0.60, this.mapH * 0.48, this.mapW * 0.22, this.mapH * 0.14);
 
     // Bottom Row Desks
-    this.addWall(this.mapW * 0.1, this.mapH * 0.75, this.mapW * 0.35, this.mapH * 0.22);
-    this.addWall(this.mapW * 0.55, this.mapH * 0.75, this.mapW * 0.35, this.mapH * 0.22);
+    this.addWall(this.mapW * 0.18, this.mapH * 0.75, this.mapW * 0.22, this.mapH * 0.14);
+    this.addWall(this.mapW * 0.60, this.mapH * 0.75, this.mapW * 0.22, this.mapH * 0.14);
 
     // Right Sidebar (Shelf/Fridge)
     this.addWall(this.mapW * 0.88, 0, this.mapW * 0.12, this.mapH * 0.4);
@@ -564,6 +567,51 @@ class OfficeScene extends Phaser.Scene {
     this.lastStepTime = 0;
     this.lastDustTime = 0;
 
+    // Removed background random collectibles
+
+    // ESC to Quit Game
+    this.input.keyboard.on('keydown-ESC', () => {
+      if (this.gameActive && this.health > 0) {
+        this.gameActive = false; // Disable game interactions
+
+        this._showWorldBubble(this.player, "I'm logging off for the day! Goodbye everyone!");
+        this.player.body.setVelocity(0, 0);
+
+        const exitX = this.mapW / 2;
+        const exitY = this.mapH + 50; // Off-screen bottom
+
+        const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, exitX, exitY);
+        const exitDuration = Math.max(1500, dist * 12);
+
+        this._walkPlayerTo(exitX, exitY, exitDuration, () => {
+          this.health = 0;
+          this.triggerGameOver();
+        });
+      }
+    });
+
+    // ── Generate Boosters ──
+    this.boosterGroup = this.add.group();
+
+    // Fixed table positions based on the provided background image (approximate relative coordinates)
+    const boosterPositions = [
+      { fx: 0.29, fy: 0.45 }, // Left round table
+      { fx: 0.67, fy: 0.45 }, // Right round table
+      { fx: 0.85, fy: 0.70 }, // Some other side area near plant
+    ];
+
+    boosterPositions.forEach((pos) => {
+      const icons = ['☕', '🍩', '🥤'];
+      const icon = icons[Math.floor(Math.random() * icons.length)];
+      const bX = pos.fx * this.mapW;
+      const bY = pos.fy * this.mapH;
+
+      // Render booster over tables
+      const b = this.add.text(bX, bY, icon, { fontSize: '20px' }).setOrigin(0.5).setDepth(4 + (bY / this.mapH) * 10);
+      this.tweens.add({ targets: b, y: b.y - 4, yoyo: true, repeat: -1, duration: 800 });
+      this.boosterGroup.add(b);
+    });
+
     // Wait for user to click Start
     this._waitForStart();
   }
@@ -574,9 +622,13 @@ class OfficeScene extends Phaser.Scene {
       this.domain = localStorage.getItem('cg_domain') || 'cyber';
       if (this.playerLabel) this.playerLabel.setText(this.username);
       this.updateHUD();
-      this.gameActive = true;
-      this._showWalkInstruction();
-      this.time.addEvent({ delay: 3500, callback: () => this.triggerNextScenario(), loop: false });
+
+      // Show intro story prompt
+      this._showIntroStory().then(() => {
+        this.gameActive = true;
+        this._showWalkInstruction();
+        this.time.addEvent({ delay: 3500, callback: () => this.triggerNextScenario(), loop: false });
+      });
     } else {
       this.time.addEvent({ delay: 200, callback: () => this._waitForStart(), loop: false });
     }
@@ -589,7 +641,7 @@ class OfficeScene extends Phaser.Scene {
     tip.className = 'walk-instruction';
     tip.innerHTML = `
       <div class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></div>
-      <span>or Arrow keys to walk • A colleague will approach you soon!</span>
+      <span>or Arrow keys to freely move around the office</span>
     `;
     document.body.appendChild(tip);
     setTimeout(() => {
@@ -598,6 +650,49 @@ class OfficeScene extends Phaser.Scene {
       tip.style.transform = 'translate(-50%, 20px)';
       setTimeout(() => tip.remove(), 600);
     }, 6000);
+  }
+
+  /* ── Intro Story ───────────────────────────────────────── */
+  _showIntroStory() {
+    return new Promise(resolve => {
+      const modal = document.createElement('div');
+      modal.className = 'game-overlay show';
+      modal.style.justifyContent = 'center';
+      modal.style.alignItems = 'center';
+      modal.style.zIndex = '9999';
+
+      const box = document.createElement('div');
+      box.className = 'scenario-card';
+      box.style.maxWidth = '500px';
+
+      const title = document.createElement('h2');
+      title.textContent = 'Welcome Aboard!';
+      title.style.color = 'var(--accent)';
+      title.style.marginBottom = '16px';
+
+      const story = document.createElement('p');
+      story.style.fontSize = '1.1rem';
+      story.style.lineHeight = '1.6';
+      story.style.marginBottom = '24px';
+      story.innerHTML = `Hi <strong>${this.username}</strong>, you are a compliance officer for RDX Solutions Private Limited and you are helping people in your office solve difficult problems related to compliance.`;
+
+      const btn = document.createElement('button');
+      btn.className = 'start-btn';
+      btn.textContent = 'Accept Mission';
+      btn.style.width = '100%';
+
+      box.appendChild(title);
+      box.appendChild(story);
+      box.appendChild(btn);
+      modal.appendChild(box);
+      document.body.appendChild(modal);
+
+      btn.onclick = () => {
+        modal.classList.remove('show');
+        setTimeout(() => modal.remove(), 300);
+        resolve();
+      };
+    });
   }
 
   addWall(x, y, w, h) {
@@ -611,6 +706,7 @@ class OfficeScene extends Phaser.Scene {
     if (this.scenarioRunning || !this.gameActive) {
       this.player.setVelocity(0);
       this._setPlayerTexture('stand');
+      this.lastPlayerMoveTime = time; // Prevent drain while in dialogue
       return;
     }
 
@@ -652,10 +748,27 @@ class OfficeScene extends Phaser.Scene {
         this.playerWalkTimer = 0;
       }
       this._setPlayerTexture(`walk${this.playerWalkFrame}`);
+      this.lastPlayerMoveTime = time; // Reset move timer
     } else {
       this._setPlayerTexture('stand');
       this.playerWalkFrame = 0;
       this.playerWalkTimer = 0;
+
+      // Inactivity Health Drain logic
+      if (!this.lastPlayerMoveTime) this.lastPlayerMoveTime = time;
+      if (time - this.lastPlayerMoveTime > 3000) { // 3 seconds idle
+        if (!this.lastHealthDrainTime || time - this.lastHealthDrainTime > 1000) {
+          this.health = Math.max(0, this.health - 1);
+          this.updateHUD();
+          if (window.soundEngine.tick) window.soundEngine.tick(); // small sound
+          this.lastHealthDrainTime = time;
+
+          if (this.health <= 0) {
+            this.gameActive = false;
+            this.triggerGameOver();
+          }
+        }
+      }
     }
 
     if (this.playerLabel) {
@@ -714,15 +827,10 @@ class OfficeScene extends Phaser.Scene {
     document.getElementById('hudUser').textContent = this.username;
     document.getElementById('hudDomain').textContent = this.domain.toUpperCase();
     document.getElementById('hudLevel').textContent = `LVL ${this.level}`;
+    document.getElementById('hudProgress').textContent = `${this.levelCorrect}/${SCENARIOS_PER_LEVEL}`;
     document.getElementById('hudScore').textContent = this.correct;
     const heartsEl = document.getElementById('hudHearts');
-    heartsEl.innerHTML = '';
-    for (let i = 0; i < this.maxLives; i++) {
-      const h = document.createElement('span');
-      h.className = 'hud-heart' + (i >= this.lives ? ' lost' : '');
-      h.textContent = '❤️';
-      heartsEl.appendChild(h);
-    }
+    heartsEl.innerHTML = `<span style="color:var(--danger); font-weight:bold;">Health: ${this.health}%</span>`;
   }
 
   pulseHeart() {
@@ -758,7 +866,7 @@ class OfficeScene extends Phaser.Scene {
 
   /* ── Trigger next question from a seated NPC ──────── */
   async triggerNextScenario() {
-    if (this.lives <= 0 || !this.gameActive) return;
+    if (this.health <= 0 || !this.gameActive) return;
 
     // Find an idle npc
     const idleNpcs = this.npcList.filter(n => n.isSitting);
@@ -777,36 +885,63 @@ class OfficeScene extends Phaser.Scene {
       return { bg, t, dur };
     };
 
-    const t1 = showThought("Hmm... who should I ask...?", 3000);
+    const thoughts1 = ["Hmm... who should I ask...?", "I need a second opinion...", "This looks fishy...", "Wait, is this normal?"];
+    const t1Msg = thoughts1[Math.floor(Math.random() * thoughts1.length)];
+    const t1 = showThought(t1Msg, 3000);
     await this.delay(t1.dur);
     t1.t.destroy();
 
-    const t2 = showThought(`Aha! ${this.username} is very knowledgeable!`, 4000);
+    const thoughts2 = [`Aha! ${this.username} is very knowledgeable!`, `I'll ask ${this.username}!`, `Let's see what ${this.username} says.`];
+    const t2Msg = thoughts2[Math.floor(Math.random() * thoughts2.length)];
+    const t2 = showThought(t2Msg, 2000);
     await this.delay(t2.dur);
     t2.t.destroy();
 
-    // Standing up (Turn towards camera)
-    this._setNpcTexture(npc, 'down', 'stand');
-    await this.delay(1000);
+    // Stay seated facing original direction
+    this._setNpcTexture(npc, npc.homeDir, 'stand');
+    await this.delay(300);
 
-    // L-Shaped movement to stay in corridors:
-    const centralX = this.mapW * 0.5;
-    const targetX = this.player.x + (this.player.x > npc.x ? -30 : 30);
-    const targetY = this.player.y;
+    // Call out user's name
+    this._showWorldBubble(npc, `Hey ${this.username}! I have a question! Can you come over here?`);
+    if (window.soundEngine.pop) window.soundEngine.pop();
 
-    // First: Horizontal to central corridor
-    const d1 = Math.abs(centralX - npc.x);
-    this._walkNpcTo(npc, centralX, npc.y, Math.max(800, d1 * 12), () => {
-      // Second: Vertical to player's row
-      const d2 = Math.abs(targetY - npc.y);
-      this._walkNpcTo(npc, centralX, targetY, Math.max(800, d2 * 12), () => {
-        // Third: Side-step to player
-        const d3 = Math.abs(targetX - centralX);
-        this._walkNpcTo(npc, targetX, targetY, Math.max(800, d3 * 12), () => {
-          this.handleNpcArrival(npc);
-        });
-      });
+    // Spawn Heart above NPC
+    npc.heartItem = this.add.text(npc.x, npc.y - 65, '❤️', { fontSize: '24px' }).setOrigin(0.5).setDepth(150);
+    this.tweens.add({ targets: npc.heartItem, y: npc.heartItem.y - 10, yoyo: true, repeat: -1, duration: 600 });
+
+    this._waitForPlayer(npc, () => {
+      // Grant Heart
+      if (npc.heartItem) {
+        npc.heartItem.destroy();
+        npc.heartItem = null;
+      }
+      this.health = Math.min(this.health + 10, 100);
+      this.updateHUD();
+      if (window.soundEngine && window.soundEngine.click) window.soundEngine.click();
+      this.showScorePopup('+10% ❤️', '#34d399');
+
+      this.handleNpcArrival(npc);
     });
+  }
+
+  _waitForPlayer(npc, onComplete) {
+    if (this.health <= 0 || !this.gameActive) {
+      if (npc.heartItem) npc.heartItem.destroy();
+      this._setNpcTexture(npc, npc.homeDir, 'stand');
+      return;
+    }
+
+    // Check distance
+    const dist = Phaser.Math.Distance.Between(npc.x, npc.y, this.player.x, this.player.y);
+    if (dist <= 60) {
+      if (onComplete) onComplete();
+      return;
+    }
+
+    // NPC stays in place, waiting...
+    this._setNpcTexture(npc, npc.homeDir, 'stand');
+
+    this.time.delayedCall(150, () => this._waitForPlayer(npc, onComplete));
   }
 
   _setNpcTexture(npc, facing, anim) {
@@ -857,9 +992,10 @@ class OfficeScene extends Phaser.Scene {
     window.soundEngine.npcArrive();
 
     const greetings = [
-      '💬 Hey, got a minute?', '💬 Quick question!',
-      '💬 Need your help here!', '💬 Hey there!',
-      '💬 Can I ask something?', '💬 Got a sec?',
+      '💬 Hi, good morning how is life going on?',
+      '💬 Hey there, hope you are having a good day!',
+      '💬 Hello! How have you been?',
+      '💬 Good to see you, how are things?',
     ];
     const greeting = greetings[Math.floor(Math.random() * greetings.length)];
 
@@ -876,13 +1012,36 @@ class OfficeScene extends Phaser.Scene {
     bubbleBg.fillRoundedRect(bx, by, bw, bh, 6);
     bubbleBg.fillTriangle(npc.x - 3, by + bh, npc.x + 3, by + bh, npc.x, by + bh + 6);
 
-    window.soundEngine.typing();
     await this.delay(1800);
     bubbleText.destroy();
     bubbleBg.destroy();
 
+    // Player auto-replies greeting (No manual typing required)
+    const playerGreetings = ['Hi there!', 'Good morning!', 'Hello!', 'Hey! Doing good.'];
+    const pGreeting = playerGreetings[Math.floor(Math.random() * playerGreetings.length)];
+    this._showWorldBubble(this.player, pGreeting);
+    if (window.soundEngine.pop) window.soundEngine.pop();
+    await this.delay(1400);
+
+    // Surprise Element Cyber Attack Check!
+    if (this.scenariosCompleted > 0 && this.scenariosCompleted % 2 === 0) {
+      this.triggerCyberAttack(npc);
+      return;
+    }
+
+    const transitionPrompts = [
+      "Hey, could you help me understand this?",
+      "Do you have a moment to clarify something for me?",
+      "Could you guide me on what to do next?",
+      "I'm not sure about this can you help me?",
+      "Can I ask you a quick question about this situation?",
+      "Do you mind sharing your thoughts on this?",
+      "Can you confirm on how do it the right way?"
+    ];
+    const transitionPrompt = transitionPrompts[Math.floor(Math.random() * transitionPrompts.length)];
+
     // Start Choice Sequence (Yes/No)
-    const choice = await this.askChoice(npc, "Hey! Can I ask you a quick compliance question?");
+    const choice = await this.askChoice(npc, transitionPrompt, true);
     if (choice === 'no') {
       this.showFeedbackToast("NPC: Oh, okay. Maybe when you're less busy!", false);
     } else {
@@ -894,29 +1053,16 @@ class OfficeScene extends Phaser.Scene {
       }
     }
 
-    // NPC returns to their desk via L-path
-    const centralX = this.mapW * 0.5;
-    const dxHoriz = Math.abs(centralX - npc.x);
-
-    this._walkNpcTo(npc, centralX, npc.y, Math.max(800, dxHoriz * 12), () => {
-      const dyVert = Math.abs(npc.homeY - npc.y);
-      this._walkNpcTo(npc, centralX, npc.homeY, Math.max(800, dyVert * 12), () => {
-        const dxFinal = Math.abs(npc.homeX - centralX);
-        this._walkNpcTo(npc, npc.homeX, npc.homeY, Math.max(800, dxFinal * 12), () => {
-          this._setNpcTexture(npc, npc.homeDir, 'stand');
-          npc.isSitting = true;
-          npc.setDepth(5 + (npc.homeY / this.mapH) * 10 - 0.5);
-
-          if (this.lives > 0) {
-            this.time.addEvent({ delay: 5000, callback: () => this.triggerNextScenario(), loop: false });
-          }
-        });
-      });
-    });
+    // NPC stays at desk, reset their state for next scenario pool
+    this._setNpcTexture(npc, npc.homeDir, 'stand');
+    npc.isSitting = true;
+    if (this.health > 0) {
+      this.time.addEvent({ delay: 5000, callback: () => this.triggerNextScenario(), loop: false });
+    }
   }
 
-  /* ── Ask simple Yes/No choice ───────────────────────── */
-  askChoice(npc, question) {
+  /* ── Ask simple Yes/No choice OR just generic input ──────── */
+  askChoice(npc, question, checkNo = true) {
     return new Promise(resolve => {
       this.scenarioRunning = true;
       const modal = document.getElementById('scenarioModal');
@@ -933,26 +1079,45 @@ class OfficeScene extends Phaser.Scene {
       q.textContent = question;
       cloud.appendChild(q);
 
-      const btnRow = document.createElement('div');
-      btnRow.style.display = 'flex';
-      btnRow.style.gap = '12px';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = checkNo ? 'Type "yes" or anything else...' : 'Type your reply...';
+      input.style.width = '100%';
+      input.style.padding = '12px';
+      input.style.borderRadius = '8px';
+      input.style.border = '1px solid var(--border)';
+      input.style.background = 'rgba(255,255,255,0.05)';
+      input.style.color = 'var(--text)';
+      input.style.marginBottom = '12px';
+      input.onkeydown = (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') submitBtn.click();
+      };
+      input.onkeyup = (e) => e.stopPropagation();
+      cloud.appendChild(input);
 
-      ['Yes', 'No'].forEach(choice => {
-        const btn = document.createElement('div');
-        btn.className = 'scenario-option';
-        btn.textContent = choice;
-        btn.style.flex = '1';
-        btn.style.textAlign = 'center';
-        btn.onclick = () => {
-          modal.classList.remove('show');
-          this.scenarioRunning = false;
-          resolve(choice.toLowerCase());
-        };
-        btnRow.appendChild(btn);
-      });
+      const submitBtn = document.createElement('div');
+      submitBtn.className = 'scenario-option';
+      submitBtn.textContent = 'Submit';
+      submitBtn.style.textAlign = 'center';
+      submitBtn.onclick = () => {
+        const val = input.value.trim().toLowerCase();
+        modal.classList.remove('show');
+        this.scenarioRunning = false;
 
-      cloud.appendChild(btnRow);
+        if (checkNo) {
+          if (/\bno\b/i.test(val) || val === "n") {
+            resolve('no');
+          } else {
+            resolve('yes');
+          }
+        } else {
+          resolve('done');
+        }
+      };
+      cloud.appendChild(submitBtn);
       modal.appendChild(cloud);
+      input.focus();
     });
   }
 
@@ -1038,6 +1203,7 @@ class OfficeScene extends Phaser.Scene {
         p.className = 'dialogue-line';
         p.style.lineHeight = '1.8';
         p.style.fontSize = '1.1rem';
+        p.innerHTML = `<strong style="color:var(--accent2)">${npc.npcName}:</strong> `;
         storyBox.appendChild(p);
 
         // Typewriter effect
@@ -1049,7 +1215,7 @@ class OfficeScene extends Phaser.Scene {
           if (charIndex < storyText.length) {
             p.textContent += storyText.charAt(charIndex);
             charIndex++;
-            if (charIndex % 4 === 0) window.soundEngine.typing();
+            // if (charIndex % 4 === 0) window.soundEngine.typing(); // Removed annoying typing sound
             storyBox.scrollTop = storyBox.scrollHeight;
             setTimeout(typeChar, typeSpeed);
           } else {
@@ -1066,7 +1232,7 @@ class OfficeScene extends Phaser.Scene {
           q.style.marginTop = '24px';
           q.style.borderTop = '1px solid rgba(255,255,255,0.1)';
           q.style.paddingTop = '16px';
-          q.textContent = s.question;
+          q.innerHTML = `<strong style="color:var(--accent)">${this.username}:</strong> <em>(Thinking: ${s.question})</em>`;
           cloud.appendChild(q);
 
           // Options Grid
@@ -1211,21 +1377,19 @@ class OfficeScene extends Phaser.Scene {
     if (isCorrect) {
       this.correct++;
       this.levelCorrect++;
+      this.scenariosCompleted++;
       window.soundEngine.correct();
       this.showScorePopup('+1 ✓', '#34d399');
       this.showFeedbackToast('✅ Correct! Great compliance awareness.', true);
       this.spawnParticles(this.player.x, this.player.y, 0x34d399, 18);
     } else {
-      this.lives--;
+      this.health = Math.max(0, this.health - 34);
       window.soundEngine.wrong();
-      this.showScorePopup('−❤️', '#f87171');
-      if (selectedIdx === null) {
-        this.showFeedbackToast('❌ You are useless! You don\'t know about compliance!', false);
-      } else {
-        this.showFeedbackToast('❌ Not quite right. Remember this for next time!', false);
-      }
-      this.pulseHeart();
-      this.cameras.main.shake(200, 0.008);
+      this.showScorePopup('−34% ❤️', '#f87171');
+
+      this.showFeedbackToast('❌ I better do right or it might have consequences', false);
+
+      this.cameras.main.shake(400, 0.015);
     }
 
     try {
@@ -1248,7 +1412,7 @@ class OfficeScene extends Phaser.Scene {
       this.scenarioRunning = false;
     }, 350);
 
-    if (this.lives <= 0) {
+    if (this.health <= 0) {
       this.time.addEvent({ delay: 600, callback: () => this.triggerGameOver(), loop: false });
       resolve(); return;
     }
@@ -1268,7 +1432,61 @@ class OfficeScene extends Phaser.Scene {
     if (remaining.length === 0 && this.level >= MAX_LEVEL) {
       this.time.addEvent({ delay: 600, callback: () => this.triggerVictory(), loop: false });
     }
-    resolve();
+
+    // Walk player back to their seat
+    const homeX = PLAYER_HOME.fx * this.mapW;
+    const homeY = PLAYER_HOME.fy * this.mapH;
+
+    // Calculate simple distance based duration
+    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, homeX, homeY);
+    const walkDuration = Math.max(800, dist * 12);
+
+    this._walkPlayerTo(homeX, homeY, walkDuration, () => {
+      this._setPlayerTexture('stand');
+      resolve();
+    });
+  }
+
+  async triggerCyberAttack(originNpc) {
+    this.scenariosCompleted++; // Increment so we don't trigger it again immediately
+
+    // Screenshake and alarm
+    this.cameras.main.shake(1500, 0.015);
+    window.soundEngine.wrong();
+    window.soundEngine.gameOver(); // Play ominous sound
+
+    // All NPCs panic
+    this.npcList.forEach(n => {
+      this._showWorldBubble(n, "Oh no! We are attacked by XYZ firm! Client data might be leaked!");
+    });
+    this._showWorldBubble(this.manager, "Everyone remain calm! Secure your workstations immediately!");
+
+    await this.delay(4000);
+
+    // Load special Surprise scenario
+    let cyberScenario = {
+      id: "surprise_attack",
+      title: "🔥 GLOBAL CYBER ATTACK",
+      story: "Red lights are flashing across the office. A rogue group known as XYZ firm is currently exfiltrating gigabytes of client data from the AstraNova live production database. The network is completely compromised and the malware is spreading rapidly.",
+      question: "What is your immediate, primary action?",
+      options: [
+        "Unplug from the network / Isolate affected terminals",
+        "Wait for IT to figure it out",
+        "Reply to the attacker's email",
+        "Pay the requested cryptocurrency ransom"
+      ],
+      correct_index: 0,
+      level: this.level
+    };
+
+    await this.askScenario(cyberScenario, originNpc);
+
+    // Ensure the NPC sits down after the special scenario
+    originNpc.isSitting = true;
+    this._setNpcTexture(originNpc, originNpc.homeDir, 'stand');
+    if (this.health > 0) {
+      this.time.addEvent({ delay: 5000, callback: () => this.triggerNextScenario(), loop: false });
+    }
   }
 
   spawnParticles(x, y, color, count) {
@@ -1291,6 +1509,8 @@ class OfficeScene extends Phaser.Scene {
   triggerGameOver() {
     window.soundEngine.gameOver();
     window.soundEngine.stopAmbient();
+    localStorage.setItem('cg_last_score', `${this.correct} / ${this.total}`);
+
     document.getElementById('gameOverStats').innerHTML =
       `Domain: <strong>${this.domain.toUpperCase()}</strong><br>` +
       `Level reached: <strong>${this.level}</strong><br>` +
@@ -1302,6 +1522,8 @@ class OfficeScene extends Phaser.Scene {
   triggerVictory() {
     window.soundEngine.victory();
     window.soundEngine.stopAmbient();
+    localStorage.setItem('cg_last_score', `${this.correct} / ${this.total}`);
+
     document.getElementById('victoryStats').innerHTML =
       `Domain: <strong>${this.domain.toUpperCase()}</strong><br>` +
       `Levels completed: <strong>${MAX_LEVEL}</strong><br>` +

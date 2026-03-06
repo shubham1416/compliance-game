@@ -140,6 +140,7 @@
     .login-card h1 span {
       background: linear-gradient(135deg, var(--accent), var(--accent2), var(--pink));
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
       background-size: 200% 200%;
       animation: gradientShift 4s ease-in-out infinite;
@@ -391,6 +392,7 @@
     .hud-brand span {
       background: linear-gradient(135deg, var(--accent), var(--accent2));
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
     }
 
@@ -986,8 +988,13 @@
 
       <div class="field">
         <label for="username">Your Name *</label>
-        <input id="username" type="text" placeholder="Enter your full name" autocomplete="off" />
+        <input id="username" type="text" placeholder="Enter your full name" autocomplete="off"
+          onkeydown="event.stopPropagation()" onkeyup="event.stopPropagation()" />
         <div class="input-hint" id="nameHint">⚠️ Please enter your name to continue</div>
+      </div>
+      <div id="lastScoreDisplay"
+        style="display:none; margin-bottom: 24px; padding: 12px; border-radius: 8px; background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.2); text-align: center; font-size: 0.9rem; color: var(--text-dim);">
+        Your last score: <span id="lastScoreVal" style="font-weight: bold; color: var(--accent2);"></span>
       </div>
 
       <div class="domain-label">Choose Training Domain</div>
@@ -1023,6 +1030,9 @@
     <div class="hud-sep"></div>
     <div class="hud-item"><span class="hud-badge domain" id="hudDomain"></span></div>
     <div class="hud-item"><span class="hud-badge level" id="hudLevel">LVL 1</span></div>
+    <div class="hud-sep"></div>
+    <div class="hud-item">Progress: <span class="hud-score" id="hudProgress" style="color:var(--accent2)">0/10</span>
+    </div>
     <div class="hud-sep"></div>
     <div class="hud-item">Score: <span class="hud-score" id="hudScore">0</span></div>
     <div class="hud-right">
@@ -1062,8 +1072,8 @@
 
   <!-- Scripts -->
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
-  <script src="sounds.js"></script>
-  <script src="game.js"></script>
+  <script src="sounds.js?v=14"></script>
+  <script src="game.js?v=14"></script>
   <script>
     /* ── Particle background ──────────────────────────── */
     (function () {
@@ -1077,7 +1087,7 @@
         { r: 167, g: 139, b: 250 },
         { r: 244, g: 114, b: 182 },
       ];
-      for (let i = 0; i < 80; i++) {
+      for (let i = 0; i < 30; i++) {
         const col = colors[Math.floor(Math.random() * colors.length)];
         ps.push({
           x: Math.random() * w, y: Math.random() * h, r: Math.random() * 1.8 + .4,
@@ -1108,6 +1118,13 @@
         requestAnimationFrame(draw);
       })();
     })();
+
+    /* ── Initialize Last Score ────────────────────────── */
+    const storedLastScore = localStorage.getItem('cg_last_score');
+    if (storedLastScore) {
+      document.getElementById('lastScoreDisplay').style.display = 'block';
+      document.getElementById('lastScoreVal').textContent = storedLastScore;
+    }
 
     /* ── Domain card selection ────────────────────────── */
     let selectedDomain = 'cyber';
