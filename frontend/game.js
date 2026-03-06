@@ -407,6 +407,7 @@ class OfficeScene extends Phaser.Scene {
     this.playerIsSitting = true;
     this.lastPlayerMoveTime = 0;
     this.lastHealthDrainTime = 0;
+    this.idleHealthDropCount = 0;
   }
 
   preload() {
@@ -584,7 +585,6 @@ class OfficeScene extends Phaser.Scene {
         const exitDuration = Math.max(1500, dist * 12);
 
         this._walkPlayerTo(exitX, exitY, exitDuration, () => {
-          this.health = 0;
           this.triggerGameOver();
         });
       }
@@ -756,12 +756,18 @@ class OfficeScene extends Phaser.Scene {
 
       // Inactivity Health Drain logic
       if (!this.lastPlayerMoveTime) this.lastPlayerMoveTime = time;
-      if (time - this.lastPlayerMoveTime > 3000) { // 3 seconds idle
+      if (time - this.lastPlayerMoveTime > 3000) {
         if (!this.lastHealthDrainTime || time - this.lastHealthDrainTime > 1000) {
           this.health = Math.max(0, this.health - 1);
+          this.idleHealthDropCount = (this.idleHealthDropCount || 0) + 1;
           this.updateHUD();
-          if (window.soundEngine.tick) window.soundEngine.tick(); // small sound
+          if (window.soundEngine.tick) window.soundEngine.tick();
           this.lastHealthDrainTime = time;
+
+          if (this.idleHealthDropCount >= 5 && this.health > 0) {
+            this.showFeedbackToast('⚠️ Keep moving around the office to stop health drops!', false);
+            this.idleHealthDropCount = 0;
+          }
 
           if (this.health <= 0) {
             this.gameActive = false;
@@ -771,9 +777,20 @@ class OfficeScene extends Phaser.Scene {
       }
     }
 
-    if (this.playerLabel) {
-      this.playerLabel.setPosition(this.player.x, this.player.y - 28);
-      this.playerLabel.setDepth(this.player.depth + 1);
+    // Check Boosters
+    if (this.boosterGroup) {
+      const children = this.boosterGroup.getChildren();
+      for (let i = children.length - 1; i >= 0; i--) {
+        const b = children[i];
+        if (b.active && Phaser.Math.Distance.Between(this.player.x, this.player.y, b.x, b.y) < 30) {
+          const icon = b.text;
+          b.destroy();
+          this.health = Math.min(100, this.health + 5);
+          this.updateHUD();
+          if (window.soundEngine.levelUp) window.soundEngine.levelUp();
+          this.showScorePopup(`+5% ${icon}`, '#34d399');
+        }
+      }
     }
 
     // Y-depth sorting
@@ -1507,6 +1524,7 @@ class OfficeScene extends Phaser.Scene {
   }
 
   triggerGameOver() {
+    this.gameActive = false;
     window.soundEngine.gameOver();
     window.soundEngine.stopAmbient();
     localStorage.setItem('cg_last_score', `${this.correct} / ${this.total}`);
@@ -1514,6 +1532,7 @@ class OfficeScene extends Phaser.Scene {
     document.getElementById('gameOverStats').innerHTML =
       `Domain: <strong>${this.domain.toUpperCase()}</strong><br>` +
       `Level reached: <strong>${this.level}</strong><br>` +
+      `Health: <strong>${this.health}%</strong><br>` +
       `Correct: <strong>${this.correct}</strong> / ${this.total}<br>` +
       `Accuracy: <strong>${this.total ? Math.round(this.correct / this.total * 100) : 0}%</strong>`;
     document.getElementById('gameOverOverlay').classList.add('show');

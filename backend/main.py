@@ -1,21 +1,48 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+"""
+Compliance Quest — Backend API (FastAPI).
+
+Provides endpoints for login, scenario retrieval,
+answer submission, leaderboard, content upload, and certificates.
+"""
+
+import os
+import time
+import logging
+from typing import Dict, List
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
-from jose import jwt
-import time, os
+
 from . import ai_engine
 
-SECRET_KEY = os.environ.get('CG_SECRET','dev-secret')
+# ── Configuration ────────────────────────────────────────
+SECRET_KEY: str = os.environ.get("CG_SECRET", "dev-secret")
+ALGORITHM: str = "HS256"
 
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])
+# ── Logging ──────────────────────────────────────────────
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-class LoginReq(BaseModel):
+# ── App Setup ────────────────────────────────────────────
+app = FastAPI(title="Compliance Quest API", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Request / Response Models ────────────────────────────
+class LoginRequest(BaseModel):
+    """Login payload from the client."""
     username: str
-    password: str = ''
+    password: str = ""
+
 
 class Scenario(BaseModel):
+    """Schema for a single compliance scenario."""
     id: str
     question: str
     options: List[str]
@@ -24,58 +51,116 @@ class Scenario(BaseModel):
     difficulty: int
     level: int
 
-_scenarios = ai_engine.generate_sample_scenarios()
-_user_stats = {}
 
-@app.post('/api/login')
-def login(req: LoginReq):
-    token = jwt.encode({'sub':req.username,'iat':int(time.time())}, SECRET_KEY, algorithm='HS256')
-    return {'access_token':token,'token_type':'bearer','user':req.username}
-
-@app.get('/api/scenarios')
-def get_scenarios(domain: str='cyber', level: int=1):
-    results = [s for s in _scenarios if s['domain']==domain and s['level']==level]
-    return results
-
-class Submit(BaseModel):
+class SubmitAnswerRequest(BaseModel):
+    """Payload when the player submits an answer."""
     user: str
     domain: str
     scenarioId: str
     selected: int
     correct: bool
 
-@app.post('/api/submit-answer')
-def submit_answer(payload: Submit):
-    stats = _user_stats.setdefault(payload.user, {'correct':0,'total':0,'weak_topics':{}})
-    stats['total'] += 1
-    if payload.correct: stats['correct'] += 1
-    # track weak topics for adaptive engine (very simple)
-    if not payload.correct:
-        t = stats['weak_topics'].setdefault(payload.domain,0); stats['weak_topics'][payload.domain]=t+1
-    return {'status':'ok','stats':stats}
 
-@app.get('/api/leaderboard')
-def leaderboard():
-    # simple ordering by correct
-    items = [{'user':u,'score':v['correct']} for u,v in _user_stats.items()]
-    items.sort(key=lambda x: x['score'], reverse=True)
-    return {'leaders':items}
+class CompletionRequest(BaseModel):
+    """Payload for generating a completion certificate."""
+    user: str = "Player"
+    domain: str = "cyber"
 
-@app.post('/api/upload-content')
-async def upload_content(file: UploadFile = File(...)):
-    content = await file.read()
-    # placeholder: parse file and generate scenarios
-    generated = ai_engine.parse_document_and_generate_scenarios(content.decode('utf-8'))
-    _scenarios.extend(generated)
-    return {'generated':len(generated)}
 
-@app.post('/api/complete')
-def complete(payload: dict):
-    # create a simple certificate file
-    name = payload.get('user','Player')
-    certs_dir = os.path.join(os.path.dirname(__file__),'certs')
+# ── In-Memory Data Store ─────────────────────────────────
+_scenarios: List[dict] = ai_engine.generate_sample_scenarios()
+_user_stats: Dict[str, dict] = {}
+
+
+# ── Endpoints ────────────────────────────────────────────
+@app.post("/api/login")
+def login(req: LoginRequest) -> dict:
+    """Authenticate user and return a JWT token."""
+    try:
+        from jose import jwt as jose_jwt
+        token = jose_jwt.encode(
+            {"sub": req.username, "iat": int(time.time())},
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+    except ImportError:
+        logger.warning("python-jose not installed; returning placeholder token")
+        token = "placeholder-token"
+
+    logger.info("User '%s' logged in", req.username)
+    return {"access_token": token, "token_type": "bearer", "user": req.username}
+
+
+@app.get("/api/scenarios")
+def get_scenarios(domain: str = "cyber", level: int = 1) -> list:
+    """Return scenarios filtered by domain and level."""
+    results = [s for s in _scenarios if s["domain"] == domain and s["level"] == level]
+    return results
+
+
+@app.post("/api/submit-answer")
+def submit_answer(payload: SubmitAnswerRequest) -> dict:
+    """Record an answer and update the player's stats."""
+    stats = _user_stats.setdefault(
+        payload.user, {"correct": 0, "total": 0, "weak_topics": {}}
+    )
+    stats["total"] += 1
+
+    if payload.correct:
+        stats["correct"] += 1
+    else:
+        weak = stats["weak_topics"]
+        weak[payload.domain] = weak.get(payload.domain, 0) + 1
+
+    logger.info(
+        "Answer from '%s': scenario=%s correct=%s",
+        payload.user, payload.scenarioId, payload.correct,
+    )
+    return {"status": "ok", "stats": stats}
+
+
+@app.get("/api/leaderboard")
+def leaderboard() -> dict:
+    """Return a sorted leaderboard of all players."""
+    items = [
+        {"user": user, "score": data["correct"]}
+        for user, data in _user_stats.items()
+    ]
+    items.sort(key=lambda x: x["score"], reverse=True)
+    return {"leaders": items}
+
+
+@app.post("/api/upload-content")
+async def upload_content(file: UploadFile = File(...)) -> dict:
+    """Upload a document and generate new scenarios from it."""
+    try:
+        content = await file.read()
+        generated = ai_engine.parse_document_and_generate_scenarios(
+            content.decode("utf-8")
+        )
+        _scenarios.extend(generated)
+        logger.info("Uploaded content generated %d new scenarios", len(generated))
+        return {"generated": len(generated)}
+    except Exception as exc:
+        logger.error("Failed to process uploaded content: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/complete")
+def complete(payload: CompletionRequest) -> dict:
+    """Generate a simple text-based completion certificate."""
+    certs_dir = os.path.join(os.path.dirname(__file__), "certs")
     os.makedirs(certs_dir, exist_ok=True)
-    path = os.path.join(certs_dir, f"{name.replace(' ','_')}_certificate.txt")
-    with open(path,'w') as f:
-        f.write(f"Certificate of Completion\nUser: {name}\nDomain: {payload.get('domain')}\n")
-    return {'status':'generated','path':path}
+
+    safe_name = payload.user.replace(" ", "_")
+    path = os.path.join(certs_dir, f"{safe_name}_certificate.txt")
+
+    with open(path, "w", encoding="utf-8") as cert_file:
+        cert_file.write(
+            f"Certificate of Completion\n"
+            f"User: {payload.user}\n"
+            f"Domain: {payload.domain}\n"
+        )
+
+    logger.info("Certificate generated for '%s' at %s", payload.user, path)
+    return {"status": "generated", "path": path}
