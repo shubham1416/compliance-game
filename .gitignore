@@ -1,1 +1,33 @@
+# Dependencies
 node_modules/
+npm-debug.log
+package-lock.json
+node_modules.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Azure deployment artifacts
+oryx-manifest.toml
+
+# Temporary files
+*.tmp
+*.log
